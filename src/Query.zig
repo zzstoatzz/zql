@@ -48,13 +48,19 @@ pub fn Query(comptime sql: []const u8) type {
             }
 
             /// map row data to a struct using column names
-            pub fn fromRow(comptime T: type, row_data: anytype) T {
+            /// row must have .text(idx) and .int(idx) methods
+            pub fn fromRow(comptime T: type, row: anytype) T {
                 comptime validateStruct(T);
                 var result: T = undefined;
                 const fields = @typeInfo(T).@"struct".fields;
                 inline for (fields) |f| {
                     const idx = comptime columnIndex(f.name);
-                    @field(result, f.name) = row_data.get(idx);
+                    @field(result, f.name) = switch (f.type) {
+                        []const u8 => row.text(idx),
+                        i64 => row.int(idx),
+                        bool => row.int(idx) != 0,
+                        else => @compileError("unsupported field type: " ++ @typeName(f.type)),
+                    };
                 }
                 return result;
             }
@@ -138,17 +144,28 @@ test "validateStruct" {
 test "fromRow" {
     const Q = Query("SELECT id, name, age FROM users");
 
+    // mock row matching leaflet-search's Row interface
     const MockRow = struct {
-        values: [3]i64,
-        pub fn get(self: @This(), idx: usize) i64 {
-            return self.values[idx];
+        texts: [3][]const u8,
+        ints: [3]i64,
+
+        pub fn text(self: @This(), idx: usize) []const u8 {
+            return self.texts[idx];
+        }
+        pub fn int(self: @This(), idx: usize) i64 {
+            return self.ints[idx];
         }
     };
 
-    const row = MockRow{ .values = .{ 42, 100, 25 } };
-    const Result = struct { id: i64, age: i64 };
-    const result = Q.fromRow(Result, row);
+    const row = MockRow{
+        .texts = .{ "42", "alice", "25" },
+        .ints = .{ 42, 0, 25 },
+    };
 
-    try std.testing.expectEqual(42, result.id);
-    try std.testing.expectEqual(25, result.age);
+    const User = struct { id: i64, name: []const u8, age: i64 };
+    const user = Q.fromRow(User, row);
+
+    try std.testing.expectEqual(42, user.id);
+    try std.testing.expectEqualStrings("alice", user.name);
+    try std.testing.expectEqual(25, user.age);
 }
