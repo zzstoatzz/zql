@@ -3,11 +3,20 @@
 comptime sql bindings for zig.
 
 ```zig
+const zql = @import("zql");
+
+const User = struct { id: i32, name: []const u8 };
+
 const Q = zql.Query("SELECT id, name FROM users WHERE id = :id");
 
-db.query(Q.positional, Q.bind(.{ .id = user_id }));
+// Q.positional = "SELECT id, name FROM users WHERE id = ?"
+// Q.columns = .{ "id", "name" }
+// Q.params = .{ "id" }
 
-const user = Q.fromRow(User, row);
+pub fn getUser(db: anytype, user_id: i32) ?User {
+    const row = db.query(Q.positional, Q.bind(.{ .id = user_id })) orelse return null;
+    return Q.fromRow(User, row);
+}
 ```
 
 ## what it does
