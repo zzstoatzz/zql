@@ -65,6 +65,30 @@ pub fn Query(comptime sql: []const u8) type {
                 return result;
             }
 
+            /// bind args struct to positional tuple in param order
+            pub fn bind(args: anytype) BindTuple(@TypeOf(args)) {
+                comptime validateArgs(@TypeOf(args));
+                var result: BindTuple(@TypeOf(args)) = undefined;
+                inline for (params, 0..) |p, i| {
+                    result[i] = @field(args, p);
+                }
+                return result;
+            }
+
+            fn BindTuple(comptime Args: type) type {
+                const fields = @typeInfo(Args).@"struct".fields;
+                var types: [param_count]type = undefined;
+                inline for (params, 0..) |p, i| {
+                    for (fields) |f| {
+                        if (std.mem.eql(u8, f.name, p)) {
+                            types[i] = f.type;
+                            break;
+                        }
+                    }
+                }
+                return std.meta.Tuple(&types);
+            }
+
             fn hasField(fields: anytype, name: []const u8) bool {
                 inline for (fields) |f| {
                     if (std.mem.eql(u8, f.name, name)) return true;
@@ -139,6 +163,20 @@ test "validateStruct" {
 
     const Partial = struct { id: i64, name: []const u8 };
     comptime Q.validateStruct(Partial);
+}
+
+test "bind" {
+    const Q = Query("INSERT INTO users (name, age) VALUES (:name, :age)");
+    try std.testing.expectEqualStrings("INSERT INTO users (name, age) VALUES (?, ?)", Q.positional);
+
+    const args = Q.bind(.{ .name = "alice", .age = @as(i64, 25) });
+    try std.testing.expectEqualStrings("alice", args[0]);
+    try std.testing.expectEqual(25, args[1]);
+
+    // order doesn't matter in input struct
+    const args2 = Q.bind(.{ .age = @as(i64, 30), .name = "bob" });
+    try std.testing.expectEqualStrings("bob", args2[0]);
+    try std.testing.expectEqual(30, args2[1]);
 }
 
 test "fromRow" {
