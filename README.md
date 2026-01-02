@@ -25,7 +25,7 @@ const user = Q.fromRow(User, row);
 // build.zig.zon
 .zql = .{
     .url = "https://github.com/zzstoatzz/zql/archive/main.tar.gz",
-    .hash = "...",
+    .hash = "zql-0.0.1-alpha-xNRI4IRNAABUb9gLat5FWUaZDD5HvxAxet_-elgR_A_y",
 },
 
 // build.zig
