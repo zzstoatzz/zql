@@ -17,6 +17,7 @@ pub const ParseResult = struct {
 };
 
 pub fn parse(comptime sql: []const u8) ParseResult {
+    @setEvalBranchQuota(sql.len * 100);
     var result = ParseResult{
         .positional = undefined,
         .positional_len = 0,
