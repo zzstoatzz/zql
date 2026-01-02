@@ -1,0 +1,11 @@
+.{
+    .name = .zql,
+    .version = "0.1.0",
+    .fingerprint = 0xd4075150e048d4c4,
+    .minimum_zig_version = "0.15.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
