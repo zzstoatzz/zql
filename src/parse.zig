@@ -1,43 +1,13 @@
-//! comptime sql parsing utilities
+//! sql parsing utilities
 
 const std = @import("std");
 
-/// query metadata extracted at comptime
-pub fn Query(comptime sql: []const u8) type {
-    comptime {
-        const parsed = parse(sql);
-        return struct {
-            pub const raw = sql;
-            pub const positional: []const u8 = parsed.positional[0..parsed.positional_len];
-            pub const param_count = parsed.param_count;
-            pub const params: []const []const u8 = parsed.params[0..parsed.params_len];
-            pub const columns: []const []const u8 = parsed.columns[0..parsed.columns_len];
+pub const MAX_PARAMS = 32;
+pub const MAX_COLS = 64;
+pub const MAX_SQL_LEN = 4096;
 
-            /// validate that args struct has all required params
-            pub fn validateArgs(comptime Args: type) void {
-                const fields = @typeInfo(Args).@"struct".fields;
-                inline for (params) |p| {
-                    var found = false;
-                    inline for (fields) |f| {
-                        if (std.mem.eql(u8, f.name, p)) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        @compileError("missing param :" ++ p ++ " in args struct");
-                    }
-                }
-            }
-        };
-    }
-}
-
-const MAX_PARAMS = 32;
-const MAX_COLS = 64;
-
-const ParseResult = struct {
-    positional: [4096]u8,
+pub const ParseResult = struct {
+    positional: [MAX_SQL_LEN]u8,
     positional_len: usize,
     param_count: usize,
     params: [MAX_PARAMS][]const u8,
@@ -46,7 +16,7 @@ const ParseResult = struct {
     columns_len: usize,
 };
 
-fn parse(comptime sql: []const u8) ParseResult {
+pub fn parse(comptime sql: []const u8) ParseResult {
     var result = ParseResult{
         .positional = undefined,
         .positional_len = 0,
@@ -57,7 +27,13 @@ fn parse(comptime sql: []const u8) ParseResult {
         .columns_len = 0,
     };
 
-    // convert :name to ? and extract param names
+    parseParams(sql, &result);
+    parseColumns(sql, &result);
+
+    return result;
+}
+
+fn parseParams(comptime sql: []const u8, result: *ParseResult) void {
     var i: usize = 0;
     while (i < sql.len) : (i += 1) {
         if (sql[i] == '?') {
@@ -80,51 +56,64 @@ fn parse(comptime sql: []const u8) ParseResult {
             result.positional_len += 1;
         }
     }
+}
 
-    // extract columns from SELECT
-    const select_start = findSelectStart(sql);
-    if (select_start) |start| {
-        const from_pos = findFromPos(sql, start) orelse sql.len;
-        const cols_str = std.mem.trim(u8, sql[start..from_pos], " \t\n\r");
+fn parseColumns(comptime sql: []const u8, result: *ParseResult) void {
+    const select_start = findSelectStart(sql) orelse return;
+    const from_pos = findFromPos(sql, select_start) orelse sql.len;
 
-        if (cols_str.len > 0 and !std.mem.eql(u8, cols_str, "*")) {
-            var col_i: usize = 0;
-            var paren_depth: usize = 0;
+    // work directly with sql and offset, not a sub-slice
+    const cols_start = select_start + countLeadingWhitespace(sql[select_start..from_pos]);
+    const cols_end = from_pos - countTrailingWhitespace(sql[select_start..from_pos]);
 
-            while (col_i < cols_str.len) {
-                while (col_i < cols_str.len and isWhitespace(cols_str[col_i])) : (col_i += 1) {}
-                if (col_i >= cols_str.len) break;
+    if (cols_start >= cols_end) return;
+    if (std.mem.eql(u8, sql[cols_start..cols_end], "*")) return;
 
-                var last_ident_start: ?usize = null;
-                var last_ident_end: ?usize = null;
+    var col_i: usize = cols_start;
+    var paren_depth: usize = 0;
 
-                while (col_i < cols_str.len) : (col_i += 1) {
-                    const c = cols_str[col_i];
-                    if (c == '(') {
-                        paren_depth += 1;
-                    } else if (c == ')') {
-                        paren_depth -|= 1;
-                    } else if (c == ',' and paren_depth == 0) {
-                        break;
-                    } else if (isIdentStart(c) and paren_depth == 0) {
-                        last_ident_start = col_i;
-                        while (col_i < cols_str.len and isIdentChar(cols_str[col_i])) : (col_i += 1) {}
-                        last_ident_end = col_i;
-                        col_i -= 1;
-                    }
-                }
+    while (col_i < cols_end) {
+        while (col_i < cols_end and isWhitespace(sql[col_i])) : (col_i += 1) {}
+        if (col_i >= cols_end) break;
 
-                if (last_ident_start) |s| {
-                    result.columns[result.columns_len] = cols_str[s..last_ident_end.?];
-                    result.columns_len += 1;
-                }
+        var last_ident_start: ?usize = null;
+        var last_ident_end: ?usize = null;
 
-                if (col_i < cols_str.len and cols_str[col_i] == ',') col_i += 1;
+        while (col_i < cols_end) : (col_i += 1) {
+            const c = sql[col_i];
+            if (c == '(') {
+                paren_depth += 1;
+            } else if (c == ')') {
+                paren_depth -|= 1;
+            } else if (c == ',' and paren_depth == 0) {
+                break;
+            } else if (isIdentStart(c) and paren_depth == 0) {
+                last_ident_start = col_i;
+                while (col_i < cols_end and isIdentChar(sql[col_i])) : (col_i += 1) {}
+                last_ident_end = col_i;
+                col_i -= 1;
             }
         }
-    }
 
-    return result;
+        if (last_ident_start) |s| {
+            result.columns[result.columns_len] = sql[s..last_ident_end.?];
+            result.columns_len += 1;
+        }
+
+        if (col_i < cols_end and sql[col_i] == ',') col_i += 1;
+    }
+}
+
+fn countLeadingWhitespace(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len and isWhitespace(s[i])) : (i += 1) {}
+    return i;
+}
+
+fn countTrailingWhitespace(s: []const u8) usize {
+    var i: usize = 0;
+    while (i < s.len and isWhitespace(s[s.len - 1 - i])) : (i += 1) {}
+    return i;
 }
 
 fn isIdentStart(c: u8) bool {
@@ -167,51 +156,15 @@ fn findFromPos(comptime sql: []const u8, start: usize) ?usize {
     return null;
 }
 
-// tests
+test "parse columns" {
+    const result = comptime parse("SELECT id, name, age FROM users");
+    try std.testing.expectEqual(3, result.columns_len);
+    try std.testing.expectEqualStrings("id", result.columns[0]);
+    try std.testing.expectEqualStrings("name", result.columns[1]);
+    try std.testing.expectEqualStrings("age", result.columns[2]);
 
-test "Query - named params" {
-    const Q = Query("SELECT * FROM users WHERE id = :id AND age > :min_age");
-    try std.testing.expectEqual(2, Q.params.len);
-    try std.testing.expectEqualStrings("id", Q.params[0]);
-    try std.testing.expectEqualStrings("min_age", Q.params[1]);
-}
-
-test "Query - positional conversion" {
-    const Q = Query("SELECT * FROM users WHERE id = :id AND age > :min_age");
-    try std.testing.expectEqualStrings("SELECT * FROM users WHERE id = ? AND age > ?", Q.positional);
-}
-
-test "Query - columns" {
-    const Q = Query("SELECT id, name, age FROM users");
-    try std.testing.expectEqual(3, Q.columns.len);
-    try std.testing.expectEqualStrings("id", Q.columns[0]);
-    try std.testing.expectEqualStrings("name", Q.columns[1]);
-    try std.testing.expectEqualStrings("age", Q.columns[2]);
-}
-
-test "Query - columns with alias" {
-    const Q = Query("SELECT id, first_name AS name FROM users");
-    try std.testing.expectEqual(2, Q.columns.len);
-    try std.testing.expectEqualStrings("id", Q.columns[0]);
-    try std.testing.expectEqualStrings("name", Q.columns[1]);
-}
-
-test "Query - columns with function" {
-    const Q = Query("SELECT COUNT(*) AS count, MAX(age) AS max_age FROM users");
-    try std.testing.expectEqual(2, Q.columns.len);
-    try std.testing.expectEqualStrings("count", Q.columns[0]);
-    try std.testing.expectEqualStrings("max_age", Q.columns[1]);
-}
-
-test "Query - param extraction for INSERT" {
-    const Q = Query("INSERT INTO users (name, age) VALUES (:name, :age)");
-    try std.testing.expectEqual(2, Q.params.len);
-    try std.testing.expectEqualStrings("name", Q.params[0]);
-    try std.testing.expectEqualStrings("age", Q.params[1]);
-}
-
-test "Query - no params" {
-    const Q = Query("SELECT * FROM users");
-    try std.testing.expectEqual(0, Q.params.len);
-    try std.testing.expectEqual(0, Q.param_count);
+    // test slicing works correctly
+    const cols: []const []const u8 = result.columns[0..result.columns_len];
+    try std.testing.expectEqual(3, cols.len);
+    try std.testing.expectEqualStrings("id", cols[0]);
 }

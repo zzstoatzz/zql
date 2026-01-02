@@ -1,0 +1,154 @@
+//! Query - comptime sql metadata extraction
+//!
+//! extracts parameter names, column names, and provides
+//! struct mapping utilities at compile time.
+
+const std = @import("std");
+const parser = @import("parse.zig");
+
+/// query metadata extracted at comptime
+pub fn Query(comptime sql: []const u8) type {
+    comptime {
+        const parsed = parser.parse(sql);
+        return struct {
+            pub const raw = sql;
+            pub const positional: []const u8 = parsed.positional[0..parsed.positional_len];
+            pub const param_count = parsed.param_count;
+            pub const params: []const []const u8 = parsed.params[0..parsed.params_len];
+            pub const columns: []const []const u8 = parsed.columns[0..parsed.columns_len];
+
+            /// validate that args struct has all required params
+            pub fn validateArgs(comptime Args: type) void {
+                const fields = @typeInfo(Args).@"struct".fields;
+                inline for (params) |p| {
+                    if (!hasField(fields, p)) {
+                        @compileError("missing param :" ++ p ++ " in args struct");
+                    }
+                }
+            }
+
+            /// validate that struct fields match query columns
+            pub fn validateStruct(comptime T: type) void {
+                const fields = @typeInfo(T).@"struct".fields;
+                inline for (fields) |f| {
+                    if (!hasColumn(f.name)) {
+                        @compileError("struct field '" ++ f.name ++ "' not found in query columns");
+                    }
+                }
+            }
+
+            /// get column index by name at comptime
+            pub inline fn columnIndex(comptime name: []const u8) comptime_int {
+                inline for (columns, 0..) |col, i| {
+                    if (comptime std.mem.eql(u8, col, name)) {
+                        return i;
+                    }
+                }
+                @compileError("column '" ++ name ++ "' not found in query");
+            }
+
+            /// map row data to a struct using column names
+            pub fn fromRow(comptime T: type, row_data: anytype) T {
+                comptime validateStruct(T);
+                var result: T = undefined;
+                const fields = @typeInfo(T).@"struct".fields;
+                inline for (fields) |f| {
+                    const idx = comptime columnIndex(f.name);
+                    @field(result, f.name) = row_data.get(idx);
+                }
+                return result;
+            }
+
+            fn hasField(fields: anytype, name: []const u8) bool {
+                inline for (fields) |f| {
+                    if (std.mem.eql(u8, f.name, name)) return true;
+                }
+                return false;
+            }
+
+            fn hasColumn(comptime name: []const u8) bool {
+                const cols = @This().columns;
+                inline for (cols) |col| {
+                    if (std.mem.eql(u8, col, name)) return true;
+                }
+                return false;
+            }
+        };
+    }
+}
+
+test "columns" {
+    const Q = Query("SELECT id, name, age FROM users");
+    try std.testing.expectEqual(3, Q.columns.len);
+    try std.testing.expectEqualStrings("id", Q.columns[0]);
+    try std.testing.expectEqualStrings("name", Q.columns[1]);
+    try std.testing.expectEqualStrings("age", Q.columns[2]);
+}
+
+test "named params" {
+    const Q = Query("SELECT * FROM users WHERE id = :id AND age > :min_age");
+    try std.testing.expectEqual(2, Q.params.len);
+    try std.testing.expectEqualStrings("id", Q.params[0]);
+    try std.testing.expectEqualStrings("min_age", Q.params[1]);
+}
+
+test "positional conversion" {
+    const Q = Query("SELECT * FROM users WHERE id = :id AND age > :min_age");
+    try std.testing.expectEqualStrings("SELECT * FROM users WHERE id = ? AND age > ?", Q.positional);
+}
+
+test "columns with alias" {
+    const Q = Query("SELECT id, first_name AS name FROM users");
+    try std.testing.expectEqual(2, Q.columns.len);
+    try std.testing.expectEqualStrings("id", Q.columns[0]);
+    try std.testing.expectEqualStrings("name", Q.columns[1]);
+}
+
+test "columns with function" {
+    const Q = Query("SELECT COUNT(*) AS count, MAX(age) AS max_age FROM users");
+    try std.testing.expectEqual(2, Q.columns.len);
+    try std.testing.expectEqualStrings("count", Q.columns[0]);
+    try std.testing.expectEqualStrings("max_age", Q.columns[1]);
+}
+
+test "columnIndex" {
+    const Q = Query("SELECT id, name, age FROM users");
+    // first verify columns work directly
+    try std.testing.expectEqual(3, Q.columns.len);
+    try std.testing.expectEqualStrings("id", Q.columns[0]);
+
+    // now try columnIndex
+    try std.testing.expectEqual(0, Q.columnIndex("id"));
+    try std.testing.expectEqual(1, Q.columnIndex("name"));
+    try std.testing.expectEqual(2, Q.columnIndex("age"));
+}
+
+test "validateStruct" {
+    const Q = Query("SELECT id, name, age FROM users");
+    // verify columns first
+    try std.testing.expectEqual(3, Q.columns.len);
+
+    const User = struct { id: i64, name: []const u8, age: i64 };
+    comptime Q.validateStruct(User);
+
+    const Partial = struct { id: i64, name: []const u8 };
+    comptime Q.validateStruct(Partial);
+}
+
+test "fromRow" {
+    const Q = Query("SELECT id, name, age FROM users");
+
+    const MockRow = struct {
+        values: [3]i64,
+        pub fn get(self: @This(), idx: usize) i64 {
+            return self.values[idx];
+        }
+    };
+
+    const row = MockRow{ .values = .{ 42, 100, 25 } };
+    const Result = struct { id: i64, age: i64 };
+    const result = Q.fromRow(Result, row);
+
+    try std.testing.expectEqual(42, result.id);
+    try std.testing.expectEqual(25, result.age);
+}

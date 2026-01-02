@@ -1,11 +1,12 @@
 # zql
 
-comptime sql ergonomics for zig.
+comptime sql ergonomics for zig. **alpha** - api may change.
 
 ## features
 
 - **named parameters**: `:name` syntax with comptime validation
 - **column extraction**: parse SELECT columns at comptime
+- **struct mapping**: map rows to structs with comptime validation
 - **zero runtime overhead**: all parsing happens at compile time
 
 ## usage
@@ -13,17 +14,24 @@ comptime sql ergonomics for zig.
 ```zig
 const zql = @import("zql");
 
-// query metadata extracted at comptime
-const Q = zql.parse.Query("SELECT id, name, age FROM users WHERE age > :min_age");
+const Q = zql.Query("SELECT id, name, age FROM users WHERE age > :min_age");
 
-// access parsed info
+// access parsed metadata
 _ = Q.raw;        // original sql
 _ = Q.positional; // "SELECT id, name, age FROM users WHERE age > ?"
 _ = Q.params;     // ["min_age"]
 _ = Q.columns;    // ["id", "name", "age"]
 
-// validate args struct has required params (comptime error if missing)
-Q.validateArgs(struct { min_age: i64 });
+// comptime validation
+Q.validateArgs(struct { min_age: i64 });  // error if param missing
+Q.validateStruct(User);                    // error if field not in columns
+
+// struct mapping (with any row type that has .get(idx))
+const User = struct { id: i64, name: []const u8 };
+const user = Q.fromRow(User, row_data);
+
+// column index lookup
+const idx = Q.columnIndex("name");  // 1
 ```
 
 ## install
@@ -39,4 +47,4 @@ Q.validateArgs(struct { min_age: i64 });
 
 ## status
 
-early development. contributions welcome.
+alpha. contributions welcome.
