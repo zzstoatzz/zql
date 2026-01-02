@@ -1,17 +1,45 @@
-//! sql parsing utilities
+//! comptime sql parsing
+//!
+//! extracts metadata from sql strings at compile time:
+//! - column names from SELECT clauses
+//! - named parameter names (:name -> ?)
+//! - positional sql with named params converted
+//!
+//! sql injection safety:
+//! - sql strings are comptime, so user input cannot be concatenated
+//! - parameters are bound via prepared statements, not interpolated
+//! - the :name syntax reinforces parameterized query patterns
+//!
+//! limitations:
+//! - SELECT * returns empty columns (can't know schema)
+//! - no subquery support in column extraction
+//! - no quoted identifier support ("column name")
 
 const std = @import("std");
 
+/// max named parameters per query
 pub const MAX_PARAMS = 32;
+
+/// max columns per SELECT
 pub const MAX_COLS = 64;
+
+/// max sql string length
 pub const MAX_SQL_LEN = 4096;
 
+/// result of parsing a sql string at comptime
 pub const ParseResult = struct {
+    /// sql with :name params replaced by ?
     positional: [MAX_SQL_LEN]u8,
     positional_len: usize,
+
+    /// total parameter count (named + positional)
     param_count: usize,
+
+    /// extracted named parameter names in order
     params: [MAX_PARAMS][]const u8,
     params_len: usize,
+
+    /// extracted column names/aliases from SELECT
     columns: [MAX_COLS][]const u8,
     columns_len: usize,
 };
@@ -157,15 +185,125 @@ fn findFromPos(comptime sql: []const u8, start: usize) ?usize {
     return null;
 }
 
-test "parse columns" {
-    const result = comptime parse("SELECT id, name, age FROM users");
-    try std.testing.expectEqual(3, result.columns_len);
-    try std.testing.expectEqualStrings("id", result.columns[0]);
-    try std.testing.expectEqualStrings("name", result.columns[1]);
-    try std.testing.expectEqualStrings("age", result.columns[2]);
+// -----------------------------------------------------------------------------
+// column extraction tests
+// -----------------------------------------------------------------------------
 
-    // test slicing works correctly
-    const cols: []const []const u8 = result.columns[0..result.columns_len];
-    try std.testing.expectEqual(3, cols.len);
-    try std.testing.expectEqualStrings("id", cols[0]);
+test "columns: basic select" {
+    const r = comptime parse("SELECT id, name, age FROM users");
+    try std.testing.expectEqual(3, r.columns_len);
+    try std.testing.expectEqualStrings("id", r.columns[0]);
+    try std.testing.expectEqualStrings("name", r.columns[1]);
+    try std.testing.expectEqualStrings("age", r.columns[2]);
+}
+
+test "columns: with alias" {
+    const r = comptime parse("SELECT id, first_name AS name FROM users");
+    try std.testing.expectEqual(2, r.columns_len);
+    try std.testing.expectEqualStrings("id", r.columns[0]);
+    try std.testing.expectEqualStrings("name", r.columns[1]);
+}
+
+test "columns: with function" {
+    const r = comptime parse("SELECT COUNT(*) AS total, MAX(age) AS oldest FROM users");
+    try std.testing.expectEqual(2, r.columns_len);
+    try std.testing.expectEqualStrings("total", r.columns[0]);
+    try std.testing.expectEqualStrings("oldest", r.columns[1]);
+}
+
+test "columns: nested function" {
+    const r = comptime parse("SELECT COALESCE(name, 'unknown') AS name FROM users");
+    try std.testing.expectEqual(1, r.columns_len);
+    try std.testing.expectEqualStrings("name", r.columns[0]);
+}
+
+test "columns: table qualified" {
+    const r = comptime parse("SELECT u.id, u.name FROM users u");
+    try std.testing.expectEqual(2, r.columns_len);
+    try std.testing.expectEqualStrings("id", r.columns[0]);
+    try std.testing.expectEqualStrings("name", r.columns[1]);
+}
+
+test "columns: case expression" {
+    const r = comptime parse("SELECT CASE WHEN x > 0 THEN 1 ELSE 0 END AS flag FROM t");
+    try std.testing.expectEqual(1, r.columns_len);
+    try std.testing.expectEqualStrings("flag", r.columns[0]);
+}
+
+test "columns: empty string literal" {
+    const r = comptime parse("SELECT id, '' AS empty FROM users");
+    try std.testing.expectEqual(2, r.columns_len);
+    try std.testing.expectEqualStrings("id", r.columns[0]);
+    try std.testing.expectEqualStrings("empty", r.columns[1]);
+}
+
+test "columns: select star returns empty" {
+    const r = comptime parse("SELECT * FROM users");
+    try std.testing.expectEqual(0, r.columns_len);
+}
+
+test "columns: multiline sql" {
+    const r = comptime parse(
+        \\SELECT id, name,
+        \\  created_at
+        \\FROM users
+    );
+    try std.testing.expectEqual(3, r.columns_len);
+    try std.testing.expectEqualStrings("id", r.columns[0]);
+    try std.testing.expectEqualStrings("name", r.columns[1]);
+    try std.testing.expectEqualStrings("created_at", r.columns[2]);
+}
+
+test "columns: snippet function (fts5)" {
+    const r = comptime parse(
+        \\SELECT uri, snippet(docs_fts, 1, '<b>', '</b>', '...', 32) AS snippet
+        \\FROM docs_fts
+    );
+    try std.testing.expectEqual(2, r.columns_len);
+    try std.testing.expectEqualStrings("uri", r.columns[0]);
+    try std.testing.expectEqualStrings("snippet", r.columns[1]);
+}
+
+// -----------------------------------------------------------------------------
+// parameter extraction tests
+// -----------------------------------------------------------------------------
+
+test "params: named" {
+    const r = comptime parse("SELECT * FROM users WHERE id = :id AND age > :min_age");
+    try std.testing.expectEqual(2, r.params_len);
+    try std.testing.expectEqualStrings("id", r.params[0]);
+    try std.testing.expectEqualStrings("min_age", r.params[1]);
+}
+
+test "params: positional passthrough" {
+    const r = comptime parse("SELECT * FROM users WHERE id = ? AND age > ?");
+    try std.testing.expectEqual(0, r.params_len); // no named params
+    try std.testing.expectEqual(2, r.param_count); // but two positional
+}
+
+test "params: mixed named and positional" {
+    const r = comptime parse("SELECT * FROM users WHERE id = :id AND age > ?");
+    try std.testing.expectEqual(1, r.params_len);
+    try std.testing.expectEqualStrings("id", r.params[0]);
+    try std.testing.expectEqual(2, r.param_count);
+}
+
+test "params: conversion to positional" {
+    const r = comptime parse("INSERT INTO users (name, age) VALUES (:name, :age)");
+    try std.testing.expectEqualStrings(
+        "INSERT INTO users (name, age) VALUES (?, ?)",
+        r.positional[0..r.positional_len],
+    );
+}
+
+test "params: underscore in name" {
+    const r = comptime parse("SELECT * FROM t WHERE x = :my_param_name");
+    try std.testing.expectEqual(1, r.params_len);
+    try std.testing.expectEqualStrings("my_param_name", r.params[0]);
+}
+
+test "params: no params" {
+    const r = comptime parse("SELECT id FROM users");
+    try std.testing.expectEqual(0, r.params_len);
+    try std.testing.expectEqual(0, r.param_count);
 }
