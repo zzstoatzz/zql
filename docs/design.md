@@ -60,32 +60,58 @@ cons:
 - complex queries still need raw SQL
 - migration story unclear
 
-### 2. query composition
+### 2. query composition (options struct pattern)
 
-build queries from reusable fragments:
+zig idiom: use options structs, not fluent builders.
 
 ```zig
-const base = zql.Select("d.uri, d.title, d.created_at")
-    .from("documents d");
+// NOT idiomatic zig:
+zql.Select("id").from("users").where("x = :x")
 
-const withFts = base
-    .join("documents_fts f ON d.uri = f.uri")
-    .where("documents_fts MATCH :query");
+// idiomatic zig - options struct:
+const Q = zql.Query(.{
+    .select = "d.uri, d.did, d.title, d.created_at",
+    .from = "documents d",
+    .joins = &.{
+        "LEFT JOIN publications p ON d.publication_uri = p.uri",
+    },
+    .where = "d.uri = :uri",
+    .order_by = "d.created_at DESC",
+    .limit = 40,
+});
+```
 
-const withTag = base
-    .join("document_tags dt ON d.uri = dt.document_uri")
-    .where("dt.tag = :tag");
+for variants, use comptime conditionals:
 
-const withBoth = withFts.and(withTag);
+```zig
+fn DocQuery(comptime opts: struct {
+    fts: bool = false,
+    tag: bool = false,
+}) type {
+    return zql.Query(.{
+        .select = if (opts.fts) fts_columns else basic_columns,
+        .from = if (opts.fts) "documents_fts f" else "documents d",
+        .joins = buildJoins(opts),
+        .where = buildWhere(opts),
+        .order_by = if (opts.fts) "rank" else "d.created_at DESC",
+    });
+}
+
+// usage:
+const DocsByFts = DocQuery(.{ .fts = true });
+const DocsByTag = DocQuery(.{ .tag = true });
+const DocsByFtsAndTag = DocQuery(.{ .fts = true, .tag = true });
 ```
 
 pros:
-- reduces duplication (DocsByTag, DocsByFts, DocsByFtsAndTag -> composable)
-- still explicit SQL, just structured
+- follows zig idioms (options struct pattern)
+- explicit, readable
+- comptime conditional logic is clear
+- type-returning function pattern from std
 
 cons:
-- complex API
-- might not cover all SQL patterns
+- more verbose than current raw SQL strings
+- query structure must fit the options model
 
 ### 3. schema validation
 
@@ -131,16 +157,43 @@ const Q = zql.Query("SELECT id, name, age FROM users");
 
 probably premature optimization for typical column counts.
 
+## zig idioms (from research)
+
+the zig community prefers:
+
+1. **options structs** over fluent builders
+2. **type-returning functions** for generics
+3. **explicit code** over clever patterns
+4. **comptime validation** via @compileError
+
+from the zig zen:
+- "favor reading code over writing code"
+- "only one obvious way to do things"
+- "communicate intent precisely"
+
 ## recommendation
 
-start with **query composition** (#2). it:
+**keep the current simple approach.** three explicit Query constants is more readable than a factory function with options.
 
-- solves a real pain point (duplicated query variants in leaflet-search)
-- stays close to SQL (no abstraction leap)
-- is incrementally adoptable
-- doesn't require schema definition
+```zig
+// current - explicit, clear
+const DocsByTag = zql.Query("SELECT ... WHERE tag = :tag ...");
+const DocsByFts = zql.Query("SELECT ... WHERE MATCH :query ...");
+const DocsByFtsAndTag = zql.Query("SELECT ... WHERE MATCH :query AND tag = :tag ...");
+```
 
-table definitions (#1) are valuable but bigger scope. schema validation (#3) requires maintaining schema twice.
+this follows zig's preference for explicit over clever. the "duplication" is actually meaningful - these queries have different semantics.
+
+if we do add composition, use the **type-returning function pattern**:
+
+```zig
+fn DocQuery(comptime opts: struct { fts: bool = false, tag: bool = false }) type {
+    // comptime conditionals to build SQL
+    return zql.Query(sql);
+}
+```
+
+but only if the duplication becomes a real maintenance burden.
 
 ## open questions
 
