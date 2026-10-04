@@ -19,9 +19,8 @@ pub fn Query(comptime sql: []const u8) type {
 
             /// validate that args struct has all required params
             pub fn validateArgs(comptime Args: type) void {
-                const fields = @typeInfo(Args).@"struct".fields;
                 inline for (params) |p| {
-                    if (!hasField(fields, p)) {
+                    if (!@hasField(Args, p)) {
                         @compileError("missing param :" ++ p ++ " in args struct");
                     }
                 }
@@ -29,10 +28,9 @@ pub fn Query(comptime sql: []const u8) type {
 
             /// validate that struct fields match query columns
             pub fn validateStruct(comptime T: type) void {
-                const fields = @typeInfo(T).@"struct".fields;
-                inline for (fields) |f| {
-                    if (!hasColumn(f.name)) {
-                        @compileError("struct field '" ++ f.name ++ "' not found in query columns");
+                inline for (@typeInfo(T).@"struct".field_names) |name| {
+                    if (!hasColumn(name)) {
+                        @compileError("struct field '" ++ name ++ "' not found in query columns");
                     }
                 }
             }
@@ -52,14 +50,14 @@ pub fn Query(comptime sql: []const u8) type {
             pub fn fromRow(comptime T: type, row: anytype) T {
                 comptime validateStruct(T);
                 var result: T = undefined;
-                const fields = @typeInfo(T).@"struct".fields;
-                inline for (fields) |f| {
-                    const idx = comptime columnIndex(f.name);
-                    @field(result, f.name) = switch (f.type) {
+                const info = @typeInfo(T).@"struct";
+                inline for (info.field_names, info.field_types) |name, F| {
+                    const idx = comptime columnIndex(name);
+                    @field(result, name) = switch (F) {
                         []const u8 => row.text(idx),
                         i64 => row.int(idx),
                         bool => row.int(idx) != 0,
-                        else => @compileError("unsupported field type: " ++ @typeName(f.type)),
+                        else => @compileError("unsupported field type: " ++ @typeName(F)),
                     };
                 }
                 return result;
@@ -76,24 +74,9 @@ pub fn Query(comptime sql: []const u8) type {
             }
 
             fn BindTuple(comptime Args: type) type {
-                const fields = @typeInfo(Args).@"struct".fields;
                 var types: [param_count]type = undefined;
-                inline for (params, 0..) |p, i| {
-                    for (fields) |f| {
-                        if (std.mem.eql(u8, f.name, p)) {
-                            types[i] = f.type;
-                            break;
-                        }
-                    }
-                }
-                return std.meta.Tuple(&types);
-            }
-
-            fn hasField(fields: anytype, name: []const u8) bool {
-                inline for (fields) |f| {
-                    if (std.mem.eql(u8, f.name, name)) return true;
-                }
-                return false;
+                inline for (params, 0..) |p, i| types[i] = @FieldType(Args, p);
+                return @Tuple(&types);
             }
 
             fn hasColumn(comptime name: []const u8) bool {
