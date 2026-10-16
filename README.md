@@ -19,6 +19,25 @@ pub fn getUser(db: anytype, user_id: i32) ?User {
 }
 ```
 
+The injection style.
+```zig
+const SomeDbRow = struct {
+    // ... fields
+    const as = Q.fromRow;
+};
+
+const UserParam = struct {
+    id: i32,
+
+    const asParam = Q.bind;
+
+    fn getUser(self: @This(), db: anytype) ?User {
+        const row: SomeDbRow = db.query(Q.positional, self.asParam()) orelse return null;
+        return row.as(User);
+    }
+};
+```
+
 ## what it does
 
 | | |
@@ -26,7 +45,7 @@ pub fn getUser(db: anytype, user_id: i32) ?User {
 | `Q.positional` | `:name` → `?` |
 | `Q.bind(.{...})` | struct → tuple in param order |
 | `Q.columns` | column names from SELECT |
-| `Q.fromRow(T, row)` | row → struct |
+| `Q.fromRow(row, T)` | row → struct |
 
 ## install
 
