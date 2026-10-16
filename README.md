@@ -15,7 +15,7 @@ const Q = zql.Query("SELECT id, name FROM users WHERE id = :id");
 
 pub fn getUser(db: anytype, user_id: i32) ?User {
     const row = db.query(Q.positional, Q.bind(.{ .id = user_id })) orelse return null;
-    return Q.fromRow(User, row);
+    return Q.fromRow(row, User);
 }
 ```
 
