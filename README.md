@@ -49,13 +49,11 @@ const UserParam = struct {
 
 ## install
 
-```zig
-// build.zig.zon
-.zql = .{
-    .url = "https://github.com/zzstoatzz/zql/archive/main.tar.gz",
-    .hash = "zql-0.0.1-alpha-xNRI4IRNAABUb9gLat5FWUaZDD5HvxAxet_-elgR_A_y",
-},
+```sh
+zig fetch --save https://tangled.org/zzstoatzz.io/zql/archive/v0.1.0-alpha.0.tar.gz
+```
 
+```zig
 // build.zig
 exe.root_module.addImport("zql", b.dependency("zql", .{}).module("zql"));
 ```
