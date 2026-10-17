@@ -59,7 +59,7 @@ pub fn parse(sql: []const u8) @This() {
 }
 
 pub fn parseComptime(comptime sql: []const u8) @This() {
-    @setEvalBranchQuota(sql.len * 2);
+    @setEvalBranchQuota(sql.len * 100);
     return comptime .parse(sql);
 }
 

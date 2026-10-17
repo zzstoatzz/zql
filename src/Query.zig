@@ -15,8 +15,9 @@ pub fn Query(sql: []const u8) type {
         pub const positional = parsed.positional[0..parsed.positional_len];
         pub const param_count = parsed.param_count;
         pub const params = parsed.params[0..parsed.params_len];
+        pub const columns = parsed.columns[0..parsed.columns_len];
         pub const columns_len = parsed.columns_len;
-        pub const Columns = blk: {
+        pub const Columns = if (parsed.columns_len == 0) @Enum(noreturn, .exhaustive, &.{}, &.{}) else blk: {
             const TagInt = std.math.IntFittingRange(0, parsed.columns_len - 1);
             var values: [parsed.columns_len]TagInt = undefined;
             for (&values, 0..) |*value, i|
@@ -319,4 +320,29 @@ test "fromRow" {
     try std.testing.expectEqual(42, user.id);
     try std.testing.expectEqualStrings("alice", user.name);
     try std.testing.expectEqual(25, user.age);
+}
+
+test "nested expressions parse within eval quota" {
+    const Q = Query(
+        \\SELECT r.did AS did,
+        \\  COUNT(DISTINCT CASE
+        \\    WHEN DATE(COALESCE(NULLIF(r.created_at, ''), r.indexed_at)) >= DATE('now', ?)
+        \\    THEN r.uri END) AS recommend_count,
+        \\  COUNT(DISTINCT r.uri) AS total_recommends,
+        \\  COUNT(DISTINCT r.document_uri) AS unique_docs,
+        \\  MAX(COALESCE(NULLIF(r.created_at, ''), r.indexed_at)) AS last_at
+        \\FROM recommends r
+        \\GROUP BY r.did
+        \\ORDER BY recommend_count DESC, last_at DESC
+    );
+    try std.testing.expectEqual(5, Q.columns_len);
+    try std.testing.expectEqual(1, Q.columnIndex("recommend_count"));
+    try std.testing.expectEqual(4, Q.columnIndex("last_at"));
+}
+
+test "query without columns" {
+    const Q = Query("DELETE FROM users WHERE id = :id");
+    try std.testing.expectEqual(0, Q.columns.len);
+    try std.testing.expectEqual(0, @typeInfo(Q.Columns).@"enum".field_names.len);
+    try std.testing.expectEqual(null, Q.columnIndex("id"));
 }
